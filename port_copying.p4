@@ -1,8 +1,8 @@
 #include <core.p4>
 #include <tna.p4>
 
-const bit<48> TELEMETRY_MAC_SRC = 0x1;
-const bit<48> TELEMETRY_MAC_DST = 0x00154d1306b2;
+const bit<48> TELEMETRY_MAC_SRC = 0xb8599f9aa190;
+const bit<48> TELEMETRY_MAC_DST = 0x98039b98ac46;
 const bit<32> TELEMETRY_LEN = 36;
 
 header Ethernet_h {
@@ -190,8 +190,10 @@ control SwitchIngress(
             drop_packet;
         }
 	const entries = {
-	    0: set_egress(128);
-	    128: set_egress(0);
+	    0: set_egress(1);
+	    1: set_egress(0);
+            60: set_egress(128);
+            128: set_egress(60);
 	}
         default_action = drop_packet();
     }
@@ -259,6 +261,8 @@ control SwitchEgress(
     bit<32> tmp3 = 0;
     bit<32> tmp4 = 0; 
 
+    //Counter<bit<8>, bit<8>>(1, CounterType_t.PACKETS) sequence_num;
+
     CRCPolynomial<bit<32>>(
 	coeff = 0x04C11DB7,
 	reversed = true,
@@ -283,6 +287,23 @@ control SwitchEgress(
 	    result2 = register2_data;
 	}
     };*/
+
+    /*
+    action count_seqnum(bit<8> ix) { 
+	//send(port);
+	sequence_num.count(ix); 
+    }
+
+    action set_mac() { hdr.ethernet.dst = 0x12345678;  }
+    
+    table seq_num {
+	key      = { eg_intr_md.egress_port : exact; }
+	actions  = { count_seqnum; NoAction; }
+	//size     = 512;
+	//counters = sequence_num;
+	const entries = { 0x80 : count_seqnum(0x00); }
+	const default_action = count_seqnum(0x00);
+    }*/
 
     action create_telemetry_data() {
 	hdr.telemetry.setValid();
@@ -339,14 +360,15 @@ control SwitchEgress(
 
     action check_crc() {
 	    hdr.crc_values.lrh = 0xFFFFFFFFFFFFFFFF;
-	    hdr.grh.version = 0x6;
 	    hdr.crc_values.class = 0xFF;
 	    hdr.crc_values.fl = 0xFFFFF;
+	    hdr.crc_values.resv8a = 0xFF;
+	    hdr.crc_values.hl = 0xFF;
+	    hdr.grh.version = 0x6;
 	    hdr.grh.pay_len = 0x0044;
 	    hdr.grh.next_hdr = 0x1B;
-	    hdr.crc_values.hl = 0xFF;
-	    hdr.grh.src_gid = 0xFFFF0a010201;
-	    hdr.grh.dst_gid = 0xFFFF0a010202;
+	    hdr.grh.src_gid = 0xFFFF0a010101;
+	    hdr.grh.dst_gid = 0xFFFF0a010102;
 	    hdr.bth.opcode = 0x0a;
 	    hdr.bth.event = 0;
 	    hdr.bth.miqreq = 1;
@@ -354,14 +376,12 @@ control SwitchEgress(
 	    hdr.bth.hdr_version = 0;
 	    hdr.bth.part_key = 0xFFFF;
 	    hdr.bth.dst_qp = 0x91C;
-	    hdr.crc_values.resv8a = 0xFF;
 	    hdr.bth.ack = 1;
 	    hdr.bth.resv2 = 0;
 	    hdr.bth.seq_num = 0;
 	    hdr.reth.virt_addr = 0x01535360;
             hdr.reth.r_key = 0x01aa66;
 	    hdr.reth.dma_len = 0x24;
-	    //hdr.telemetry.src = 0x19cfbdb81bc590daaeabe164e88a3198;
 	    hdr.telemetry.src = 0x6C6C6C6C6C6C6C6C6C6C6C6C6C6C6C6C;
 	    hdr.telemetry.dst = 0x6C6C6C6C6C6C6C6C6C6C6C6C6C6C6C6C;
 	    hdr.telemetry.sport = 0x6C6C;
@@ -424,8 +444,25 @@ control SwitchEgress(
 	hdr.crc.crc = tmp1 | tmp3;
     }
 
+
+    action set_qp_vr_rk_action(bit<24> qp, bit<64> vr, bit<32> rk) { 
+        hdr.bth.dst_qp = qp;
+        hdr.reth.virt_addr = vr;
+        hdr.reth.r_key = rk;
+    }
+    
+    table set_qp_vr_rk {
+        key = {
+            eg_intr_md.egress_port : exact;
+        }
+        actions = {
+            set_qp_vr_rk_action;
+        }
+    }
+
+
     apply {
-	if (eg_intr_md.egress_port == 0x3C) {
+	if (hdr.udp.isValid() && eg_intr_md.egress_port == 0x80) {
 	    hdr.ethernet.typ = 0x8915;
 	    assign_grh_fields();
 	    assign_bth_fields();
@@ -442,11 +479,13 @@ control SwitchEgress(
 		telemetry_ipv6_data();
 	    }  
 	    check_crc();
+            set_qp_vr_rk.apply();
 	    calculate_crc();
 	    swap_crc();
 	    swap2_crc();
 	    swap3_crc();
 	    swap4_crc();
+	    //seq_num.apply();
 	}
     }
 }
