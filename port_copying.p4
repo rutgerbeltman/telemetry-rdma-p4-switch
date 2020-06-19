@@ -3,7 +3,9 @@
 
 const bit<48> TELEMETRY_MAC_SRC = 0xb8599f9aa190;
 const bit<48> TELEMETRY_MAC_DST = 0x98039b98ac46;
-const bit<32> TELEMETRY_LEN = 36;
+const bit<32> TELEMETRY_LEN = 40;
+const bit<64> TELEMETRY_LEN_64 = 40;
+const bit<3>  DIGEST_TYPE = 1;
 
 header Ethernet_h {
     bit<48>  dst;
@@ -84,6 +86,7 @@ header tel_h {
     bit<128> dst;
     bit<16>  sport;
     bit<16>  dport;
+    bit<32>  seq_num;
 }
 
 header crc_values_t {
@@ -95,7 +98,10 @@ header crc_values_t {
     bit<4>   left;
 }
 
-struct metadata_t {}
+struct metadata_t {
+    bit<32>  counter;
+}
+
 struct egress_metadata_t {}
 
 struct header_t {
@@ -111,6 +117,10 @@ struct header_t {
     crc_values_t crc_values;
 }
 
+struct digest_signal_t {
+    bit<32>    count;
+}
+
 parser SwitchIngressParser(
         packet_in pkt,
         out header_t hdr,
@@ -120,7 +130,12 @@ parser SwitchIngressParser(
     state start {
         pkt.extract(ig_intr_md);
         pkt.advance(PORT_METADATA_SIZE);
-        transition parse_ethernet;
+        transition md_init;
+    }
+
+    state md_init {
+	ig_md.counter = 0;
+	transition parse_ethernet;
     }
 
     state parse_ethernet {
@@ -160,8 +175,16 @@ control SwitchIngressDeparser(
         in metadata_t ig_md,
         in ingress_intrinsic_metadata_for_deparser_t ig_dprsr_md) {
 
+    Digest <digest_signal_t>() signal;
+
     apply {
-         pkt.emit(hdr);
+	if (ig_dprsr_md.digest_type == 1) {
+	    signal.pack ({
+		ig_md.counter
+	    });
+	}
+        
+	pkt.emit(hdr);
     }
 }
 
@@ -172,6 +195,14 @@ control SwitchIngress(
         in    ingress_intrinsic_metadata_from_parser_t ig_prsr_md,
         inout ingress_intrinsic_metadata_for_deparser_t ig_dprsr_md,
         inout ingress_intrinsic_metadata_for_tm_t ig_tm_md) {
+
+    Register<bit<32>, bit<16>>(1) count;
+    RegisterAction<bit<32>, bit<16>, bit<32>>(count) count_packets = {
+	void apply(inout bit<32> register, out bit<32> result) {
+	    result = register;
+	    register = register + 1;
+	}	
+    };
 
     action set_egress(bit<9> port) {
         ig_tm_md.ucast_egress_port = port;
@@ -200,7 +231,15 @@ control SwitchIngress(
 
     apply {
         port_forwarding.apply();
-	ig_tm_md.copy_to_cpu = 1;
+        if(ig_intr_md.ingress_port != 60 && ig_intr_md.ingress_port != 128)
+	{
+            ig_tm_md.copy_to_cpu = 1;
+	    ig_md.counter = count_packets.execute(0);
+	    if (ig_md.counter  == 3) {
+    	        ig_dprsr_md.digest_type = DIGEST_TYPE;
+	    }
+        }
+
         /*ig_tm_md.bypass_egress = 1;*/
     }
 }
@@ -260,8 +299,7 @@ control SwitchEgress(
     bit<32> tmp2 = 0;
     bit<32> tmp3 = 0;
     bit<32> tmp4 = 0; 
-
-    //Counter<bit<8>, bit<8>>(1, CounterType_t.PACKETS) sequence_num;
+    bit<64> tmp5 = 0;
 
     CRCPolynomial<bit<32>>(
 	coeff = 0x04C11DB7,
@@ -273,42 +311,36 @@ control SwitchEgress(
 
     Hash<bit<32>>(HashAlgorithm_t.CUSTOM, poly) crc_hash;
 
+    Register<bit<16>, bit<16>>(1) seqnum;
+    Register<bit<64>, bit<16>>(1) offset_va;
+    Register<bit<32>, bit<16>>(1) seqnum_exp;
 
-/*    Register<vr_addr_t>(1) mem_address;
-    Register<rm_key_t>(1) keys;
-
-    RegisterAction<bit<64>, vr_addr_t>(mem_address) virtual_address = {
-	void apply(inout bit<64> register1_data, out bit<64> result1) {
-	    result1 = register1_data;
+    RegisterAction<bit<16>, bit<16>, bit<16>>(seqnum) get_va = {
+	void apply(inout bit<16> register_data, out bit<16> result) {
+	    result = register_data;
+	    register_data = register_data + 1;
+   	}
     };
 
-    RegisterAction<bit<32>, rm_key_t>(keys) remote_key = {
-	void apply(inout bit<32> register2_data, out bit<32> result2) {
-	    result2 = register2_data;
+    RegisterAction<bit<64>, bit<16>, bit<64>>(offset_va) get_va_offset = {
+	void apply(inout bit<64> data, out bit<64> offset) {
+	    offset = data;
+	    data = data + TELEMETRY_LEN_64;
 	}
-    };*/
+    };
 
-    /*
-    action count_seqnum(bit<8> ix) { 
-	//send(port);
-	sequence_num.count(ix); 
-    }
-
-    action set_mac() { hdr.ethernet.dst = 0x12345678;  }
-    
-    table seq_num {
-	key      = { eg_intr_md.egress_port : exact; }
-	actions  = { count_seqnum; NoAction; }
-	//size     = 512;
-	//counters = sequence_num;
-	const entries = { 0x80 : count_seqnum(0x00); }
-	const default_action = count_seqnum(0x00);
-    }*/
+    RegisterAction<bit<32>, bit<16>, bit<32>>(seqnum_exp) get_seq_exp = {
+	void apply(inout bit<32> register_data, out bit<32> result) {
+	    result = register_data;
+	    register_data = register_data + 1;
+	}
+    };
 
     action create_telemetry_data() {
 	hdr.telemetry.setValid();
         hdr.telemetry.sport      = hdr.udp.sport;
         hdr.telemetry.dport      = hdr.udp.dport;
+	hdr.telemetry.seq_num    = get_seq_exp.execute(0);
         hdr.ethernet.src         = TELEMETRY_MAC_SRC;
         hdr.ethernet.dst         = TELEMETRY_MAC_DST;
     }
@@ -329,11 +361,11 @@ control SwitchEgress(
         hdr.grh.version          = 0x6;
         hdr.grh.class            = 0;
         hdr.grh.flow_lab         = 0;
-        hdr.grh.pay_len          = 94;
+        hdr.grh.pay_len          = 0x48;
         hdr.grh.next_hdr         = 0x1B;
         hdr.grh.hop_lim          = 0x40;
-        hdr.grh.src_gid          = 0xFFFFFFFF;
-        hdr.grh.dst_gid          = 0xFFFFFFFF;
+        hdr.grh.src_gid          = 0xFFFF0a010101;
+        hdr.grh.dst_gid          = 0xFFFF0a010102;
     }
     
     action assign_bth_fields() {
@@ -342,52 +374,28 @@ control SwitchEgress(
         hdr.bth.event = 0;
         hdr.bth.miqreq = 1;
 	hdr.bth.pad_cnt = 0;
-        hdr.bth.hdr_version = 0x4;
+        hdr.bth.hdr_version = 0x0;
         hdr.bth.part_key = 0xFFFF;
         hdr.bth.resv1 = 0;
-        hdr.bth.dst_qp = 1;
-        hdr.bth.ack = 0;
+        hdr.bth.ack = 1;
 	hdr.bth.resv2 = 0;
-	hdr.bth.seq_num = 1;
+	hdr.bth.seq_num = (bit<24>) get_va.execute(0);
     }
 
     action assign_reth_fields() {
 	hdr.reth.setValid();
-	hdr.reth.virt_addr = 1;
-	hdr.reth.r_key = 1;
+        hdr.reth.virt_addr = get_va_offset.execute(0);
 	hdr.reth.dma_len = TELEMETRY_LEN;
     } 
 
-    action check_crc() {
-	    hdr.crc_values.lrh = 0xFFFFFFFFFFFFFFFF;
-	    hdr.crc_values.class = 0xFF;
-	    hdr.crc_values.fl = 0xFFFFF;
-	    hdr.crc_values.resv8a = 0xFF;
-	    hdr.crc_values.hl = 0xFF;
-	    hdr.grh.version = 0x6;
-	    hdr.grh.pay_len = 0x0044;
-	    hdr.grh.next_hdr = 0x1B;
-	    hdr.grh.src_gid = 0xFFFF0a010101;
-	    hdr.grh.dst_gid = 0xFFFF0a010102;
-	    hdr.bth.opcode = 0x0a;
-	    hdr.bth.event = 0;
-	    hdr.bth.miqreq = 1;
-    	    hdr.bth.pad_cnt = 0;
-	    hdr.bth.hdr_version = 0;
-	    hdr.bth.part_key = 0xFFFF;
-	    hdr.bth.dst_qp = 0x91C;
-	    hdr.bth.ack = 1;
-	    hdr.bth.resv2 = 0;
-	    hdr.bth.seq_num = 0;
-	    hdr.reth.virt_addr = 0x01535360;
-            hdr.reth.r_key = 0x01aa66;
-	    hdr.reth.dma_len = 0x24;
-	    hdr.telemetry.src = 0x6C6C6C6C6C6C6C6C6C6C6C6C6C6C6C6C;
-	    hdr.telemetry.dst = 0x6C6C6C6C6C6C6C6C6C6C6C6C6C6C6C6C;
-	    hdr.telemetry.sport = 0x6C6C;
-	    hdr.telemetry.dport = 0x6C00;
+    action assign_crc_values(){
+    hdr.crc_values.lrh = 0xFFFFFFFFFFFFFFFF;
+    hdr.crc_values.class = 0xFF;
+    hdr.crc_values.fl = 0xFFFFF;
+    hdr.crc_values.hl = 0xFF;
+    hdr.crc_values.resv8a = 0xFF;
     }
-
+    
     action calculate_crc() {
 	hdr.crc.setValid();
 	hdr.crc.crc = crc_hash.get({
@@ -417,7 +425,8 @@ control SwitchEgress(
 	    hdr.telemetry.src,
 	    hdr.telemetry.dst,
 	    hdr.telemetry.sport,
-	    hdr.telemetry.dport
+	    hdr.telemetry.dport,
+            hdr.telemetry.seq_num
 	});
     }	
 
@@ -447,19 +456,18 @@ control SwitchEgress(
 
     action set_qp_vr_rk_action(bit<24> qp, bit<64> vr, bit<32> rk) { 
         hdr.bth.dst_qp = qp;
-        hdr.reth.virt_addr = vr;
+        hdr.reth.virt_addr = hdr.reth.virt_addr + vr;
         hdr.reth.r_key = rk;
     }
     
     table set_qp_vr_rk {
         key = {
-            eg_intr_md.egress_port : exact;
+            hdr.udp.dport : exact;
         }
         actions = {
             set_qp_vr_rk_action;
         }
     }
-
 
     apply {
 	if (hdr.udp.isValid() && eg_intr_md.egress_port == 0x80) {
@@ -478,14 +486,13 @@ control SwitchEgress(
 	    } else {
 		telemetry_ipv6_data();
 	    }  
-	    check_crc();
             set_qp_vr_rk.apply();
-	    calculate_crc();
+            assign_crc_values();
+            calculate_crc();
 	    swap_crc();
 	    swap2_crc();
 	    swap3_crc();
 	    swap4_crc();
-	    //seq_num.apply();
 	}
     }
 }
