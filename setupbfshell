@@ -1,0 +1,18 @@
+ucli
+pm
+port-add 16/- 25G NONE
+an-set 16/- 1
+port-enb 16/-
+port-add 24/0 10G NONE
+an-set 24/0 0
+port-enb 24/0 
+port-add 31/0 100G NONE
+port-add 32/0 100G NONE
+an-set 31/0 2
+an-set 32/0 2
+port-enb 31/0
+port-enb 32/0
+show
+exit
+bfrt_python /root/source/pythonscript.py
+exit
