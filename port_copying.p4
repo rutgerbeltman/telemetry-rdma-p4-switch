@@ -3,8 +3,8 @@
 
 const bit<48> TELEMETRY_MAC_SRC = 0xb8599f9aa190;
 const bit<48> TELEMETRY_MAC_DST = 0x98039b98ac46;
-const bit<32> TELEMETRY_LEN = 48;
-const bit<64> TELEMETRY_LEN_64 = 48;
+const bit<32> TELEMETRY_LEN = 44;
+const bit<64> TELEMETRY_LEN_64 = 44;
 const bit<3>  DIGEST_TYPE = 1;
 
 header Ethernet_h {
@@ -89,6 +89,10 @@ header RETH_h {
     bit<32>  dma_len;
 }
 
+header immDt_h {
+    bit<32> value;
+}
+
 header inv_crc_h {
     bit<32>  crc;
 }
@@ -100,7 +104,6 @@ header tel_h {
     bit<16>  dport;
     bit<32>  seq_num;
     bit<32>  ack;
-    bit<32>  tel_seq_num;
 }
 
 header crc_values_t {
@@ -126,6 +129,7 @@ struct header_t {
     GRH_h      grh;
     BTH_h      bth;
     RETH_h     reth;
+    immDt_h    immediate;
     tel_h      telemetry;
     inv_crc_h  crc;
     crc_values_t crc_values;
@@ -346,7 +350,8 @@ control SwitchEgress(
         hdr.telemetry.dport       = hdr.tcp.dport;
 	hdr.telemetry.seq_num     = hdr.tcp.seq_num;
 	hdr.telemetry.ack	  = hdr.tcp.ack;
-	hdr.telemetry.tel_seq_num = get_seq_exp.execute(0);
+        hdr.immediate.setValid();
+        hdr.immediate.value = 0x41414141; //get_seq_exp.execute(0);
         hdr.ethernet.src          = TELEMETRY_MAC_SRC;
         hdr.ethernet.dst          = TELEMETRY_MAC_DST;
     }
@@ -376,7 +381,7 @@ control SwitchEgress(
     
     action assign_bth_fields() {
 	hdr.bth.setValid();
-        hdr.bth.opcode = 0x0A;
+        hdr.bth.opcode = 0x0B;
         hdr.bth.event = 0;
         hdr.bth.miqreq = 1;
 	hdr.bth.pad_cnt = 0;
@@ -426,13 +431,13 @@ control SwitchEgress(
 	    hdr.reth.virt_addr,
 	    hdr.reth.r_key,
 	    hdr.reth.dma_len,
+            hdr.immediate.value,
 	    hdr.telemetry.src,
 	    hdr.telemetry.dst,
 	    hdr.telemetry.sport,
 	    hdr.telemetry.dport,
-	    hdr.telemetry.seq_num,
-	    hdr.telemetry.ack,
-            hdr.telemetry.tel_seq_num
+            hdr.telemetry.seq_num,
+	    hdr.telemetry.ack
 	});
     }	
 
